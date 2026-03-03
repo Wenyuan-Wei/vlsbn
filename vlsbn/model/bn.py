@@ -15,20 +15,20 @@ Discretisation thresholds are fitted on the training set:
 
 BN structure learning
 ---------------------
-TODO: integrate BaNDyT (https://github.com/bandyt-group/bandyt).
-      Specifically review bandyt/bandyt.py for the structure-learning
-      entry point and bandyt/oflib.py for the C++ scoring extension.
-      The interface below is intentionally BaNDyT-shaped so the swap
-      will be minimal.
+Structure is learned via BaNDyT (https://github.com/bandyt-group/bandyt)
+using greedy hill-climbing with the MDL (BIC) objective.  BaNDyT must be
+installed for learn_structure() to produce a real graph; if it is absent
+the function falls back to an empty edge list and logs a warning.
 
-Until BaNDyT is wired in, a placeholder hill-climbing stub (using
-networkx DAGs) holds the interface stable.
+Install BaNDyT:
+    pip install git+https://github.com/bandyt-group/bandyt.git
 """
 
 from __future__ import annotations
 
 import logging
 import pickle
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -195,39 +195,89 @@ class BayesianNetwork:
 
 
 # ---------------------------------------------------------------------------
-# Structure learning  (TODO: replace stub with BaNDyT)
+# Structure learning  (BaNDyT)
 # ---------------------------------------------------------------------------
 
 def learn_structure(
     discrete_df: pd.DataFrame,
     max_parents: int = 4,
 ) -> list[tuple[str, str]]:
-    """Learn BN DAG structure from a discretised feature DataFrame.
+    """Learn BN DAG structure from a discretised feature DataFrame via BaNDyT.
 
-    TODO: replace this stub with BaNDyT's structure-learning routine.
-          Review bandyt/bandyt.py for the entry point.
-          Review bandyt/oflib.py for the C++ BIC/BDeu scoring extension.
+    Uses BaNDyT's greedy hill-climbing search with the MDL (BIC) objective.
+    The discrete data is written to a temporary CSV file so BaNDyT's loader
+    can read it without modification.
 
-    Current stub returns an empty edge list (fully disconnected graph),
-    which yields a valid but naive BN.  Swap in BaNDyT before training.
+    If BaNDyT is not installed the function returns an empty edge list and
+    logs a warning — the rest of the pipeline remains functional with a
+    naive (fully disconnected) BN.
 
     Parameters
     ----------
     discrete_df : pd.DataFrame
-        Integer-valued (0–3) feature matrix; rows = complexes.
+        Integer-valued (0–3) feature matrix; rows = complexes,
+        columns = feature triplet keys.
     max_parents : int
-        Maximum in-degree per node (BaNDyT parameter).
+        Maximum in-degree per node.  BaNDyT's MDL objective already
+        penalises complexity, so this acts as a hard upper-bound safety
+        valve.  When a node exceeds the limit the weakest parents are
+        dropped (greedy ascent adds the best parent first).
 
     Returns
     -------
     list[tuple[str, str]]
-        Directed edges (parent_node, child_node).
+        Directed edges as (parent_node, child_node) name pairs.
     """
-    logger.warning(
-        "learn_structure: BaNDyT not yet integrated — returning empty graph. "
-        "See TODO in vlsbn/model/bn.py."
+    try:
+        from bandyt import search as _BaNDyT_search, loader as _loader, mdl as _mdl
+    except ImportError:
+        logger.warning(
+            "BaNDyT is not installed — returning empty graph.  "
+            "Install with:  pip install git+https://github.com/bandyt-group/bandyt.git"
+        )
+        return []
+
+    # BaNDyT's loader reads a CSV where the first row holds variable names.
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".csv", delete=False, newline=""
     )
-    return []
+    tmp_path = Path(tmp.name)
+    try:
+        discrete_df.to_csv(tmp, index=False)
+        tmp.close()
+
+        # axis=1  → variable names are in the first row
+        # names=1 → first row is a header (not a data row)
+        dt = _loader(str(tmp_path), sep=",", axis=1, names=1)
+
+        srch = _BaNDyT_search(dt, ofunc=_mdl)
+        srch.ascent()
+
+        bn = srch.BN  # learned bnet object
+
+        edges: list[tuple[str, str]] = []
+        for child_idx, parent_idxs in enumerate(bn.pnodes):
+            child_name = bn.node_names[child_idx]
+            # Greedy ascent adds the most-improving parent first, so
+            # truncating to max_parents keeps the highest-value parents.
+            if len(parent_idxs) > max_parents:
+                logger.warning(
+                    "Node '%s' has %d parents after learning; "
+                    "truncating to max_parents=%d.",
+                    child_name, len(parent_idxs), max_parents,
+                )
+                parent_idxs = parent_idxs[:max_parents]
+            for parent_idx in parent_idxs:
+                edges.append((bn.node_names[parent_idx], child_name))
+
+        logger.info(
+            "BaNDyT structure learning complete: %d nodes, %d edges.",
+            len(discrete_df.columns), len(edges),
+        )
+        return edges
+
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +354,7 @@ def train(
     -----
     1. Fit discretisation thresholds.
     2. Discretise feature matrix.
-    3. Learn DAG structure (BaNDyT — currently stubbed).
+    3. Learn DAG structure via BaNDyT (MDL hill-climbing).
     4. Fit CPTs with Laplace smoothing.
     5. Return a BayesianNetwork object.
 
