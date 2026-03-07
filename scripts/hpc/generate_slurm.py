@@ -70,6 +70,9 @@ def parse_args() -> argparse.Namespace:
                    help="Output directory for generated scripts")
     p.add_argument("--max-array-tasks",  type=int, default=2000,
                    help="Hard cap on simultaneous array tasks (cluster courtesy)")
+    p.add_argument("--dry-run",          action="store_true",
+                   help="Embed --dry-run in 01_process.sh so the array job reports "
+                        "its batch plan without downloading or writing any data")
     return p.parse_args()
 
 
@@ -130,6 +133,7 @@ def write_fetch_ids(args: argparse.Namespace, out_dir: Path) -> None:
 
 def write_process(args: argparse.Namespace, out_dir: Path) -> None:
     account = _account_line(args.account)
+    dry_run_flag = " \\\n            --dry-run" if args.dry_run else ""
     # Array range is set dynamically by 00_fetch_ids.sh; this template uses
     # a placeholder that sbatch --array overrides at submission time.
     script = textwrap.dedent(f"""\
@@ -159,7 +163,7 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
             --ids-file   data/pdb_ids.txt \\
             --out-dir    data/chunks \\
             --raw-dir    data/raw \\
-            --batch-size {args.batch_size}
+            --batch-size {args.batch_size}{dry_run_flag}
 
         echo "[$(date)] Task $SLURM_ARRAY_TASK_ID finished (exit $?)"
     """).rstrip()
@@ -227,6 +231,10 @@ def main() -> None:
     print(f"  batch size   = {args.batch_size} PDBs/task")
     print(f"  max parallel = {args.max_array_tasks} simultaneous tasks")
     print(f"  getcontacts  = {args.getcontacts}")
+    if args.dry_run:
+        print()
+        print("  *** DRY-RUN MODE: 01_process.sh will report batch plans only,")
+        print("      no PDB files will be downloaded or processed. ***")
 
 
 if __name__ == "__main__":

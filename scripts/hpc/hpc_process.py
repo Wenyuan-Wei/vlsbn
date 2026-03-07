@@ -21,6 +21,10 @@ Usage (Slurm sets SLURM_ARRAY_TASK_ID automatically)
     # Manual test of task 3:
     python scripts/hpc/hpc_process.py --ids-file data/pdb_ids.txt \\
         --out-dir data/chunks --task-id 3
+
+    # Dry run — prints batch plan, no downloads or writes:
+    python scripts/hpc/hpc_process.py --ids-file data/pdb_ids.txt \\
+        --out-dir data/chunks --task-id 3 --dry-run
 """
 
 from __future__ import annotations
@@ -63,6 +67,8 @@ def parse_args() -> argparse.Namespace:
                    help="Override $SLURM_ARRAY_TASK_ID (useful for local testing)")
     p.add_argument("--delay",      type=float, default=0.05,
                    help="Per-download sleep in seconds (rate-limiting)")
+    p.add_argument("--dry-run",    action="store_true",
+                   help="Print batch plan and exit without downloading or writing anything")
     return p.parse_args()
 
 
@@ -86,6 +92,25 @@ def main() -> None:
 
     if not batch:
         logger.info("No IDs for this task. Exiting.")
+        return
+
+    # ------------------------------------------------------------------ #
+    # Dry run: report plan and exit without touching disk or network       #
+    # ------------------------------------------------------------------ #
+    if args.dry_run:
+        done_file = args.out_dir / f"done_{task_id:05d}.txt"
+        done_ids: set[str] = set()
+        if done_file.exists():
+            done_ids = {l.strip() for l in done_file.read_text().splitlines() if l.strip()}
+        pending = [pid for pid in batch if pid not in done_ids]
+        logger.info("DRY RUN — no downloads or writes will happen.")
+        logger.info("  Task ID    : %d", task_id)
+        logger.info("  Batch range: IDs %d–%d (%d PDBs)", start, start + len(batch) - 1, len(batch))
+        logger.info("  Already done: %d  |  Would process: %d", len(done_ids & set(batch)), len(pending))
+        if pending:
+            preview = pending[:10]
+            logger.info("  First IDs to process: %s%s",
+                        ", ".join(preview), " …" if len(pending) > 10 else "")
         return
 
     # ------------------------------------------------------------------ #
