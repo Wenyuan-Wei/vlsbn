@@ -17,9 +17,14 @@ env/
 data/raw/
 data/filtered/
 data/processed/
+data/chunks/
+data/pdb_ids.txt
 
 # Trained model artefacts
 data/models/
+
+# Slurm job logs (generated at runtime)
+slurm/logs/
 
 # Jupyter
 .ipynb_checkpoints/

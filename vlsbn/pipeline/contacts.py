@@ -116,7 +116,7 @@ def _run_getcontacts(
         "python", GETCONTACTS_SCRIPT,
         "--structure",  str(pdb_path),
         "--output",     str(out_path),
-        "--itypes",     " ".join(itypes),
+        "--itypes",     *itypes,
         "--sele",       "protein",
         "--sele2",      f"resname {ligand_resname}",
     ]

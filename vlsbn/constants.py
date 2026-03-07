@@ -79,5 +79,6 @@ ARTIFACT_LIGANDS: frozenset[str] = frozenset({
 # RCSB endpoints
 # ---------------------------------------------------------------------------
 
-RCSB_SEARCH_URL   = "https://search.rcsb.org/rcsbsearch/v1/query"
-RCSB_DOWNLOAD_URL = "https://files.rcsb.org/download/{pdb_id}.pdb"
+RCSB_SEARCH_URL    = "https://search.rcsb.org/rcsbsearch/v2/query"
+RCSB_DOWNLOAD_URL  = "https://files.rcsb.org/download/{pdb_id}.pdb"
+RCSB_CIF_DOWNLOAD_URL = "https://files.rcsb.org/download/{pdb_id}.cif"

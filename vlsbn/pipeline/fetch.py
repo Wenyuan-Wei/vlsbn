@@ -9,7 +9,9 @@ Typical usage
 
 from __future__ import annotations
 
+import io
 import logging
+import tempfile
 import time
 from pathlib import Path
 
@@ -19,6 +21,7 @@ from vlsbn.constants import (
     ARTIFACT_LIGANDS,
     MAX_RESOLUTION,
     MAX_RFREE,
+    RCSB_CIF_DOWNLOAD_URL,
     RCSB_DOWNLOAD_URL,
     RCSB_SEARCH_URL,
     RAW_DIR,
@@ -32,7 +35,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _build_query(max_resolution: float, max_rfree: float) -> dict:
-    """Construct an RCSB Search API v1 JSON query.
+    """Construct an RCSB Search API v2 JSON query.
 
     Filters applied server-side:
     - X-ray crystallography only
@@ -59,7 +62,7 @@ def _build_query(max_resolution: float, max_rfree: float) -> dict:
             "logical_operator": "and",
             "nodes": [
                 _text_node(
-                    "rcsb_entry_info.experimental_method",
+                    "exptl.method",
                     "exact_match",
                     "X-RAY DIFFRACTION",
                 ),
@@ -69,7 +72,7 @@ def _build_query(max_resolution: float, max_rfree: float) -> dict:
                     max_resolution,
                 ),
                 _text_node(
-                    "refine.ls_rfactor_rfree",
+                    "refine.ls_R_factor_R_free",
                     "less_or_equal",
                     max_rfree,
                 ),
@@ -136,19 +139,48 @@ def fetch_pdb_ids(
 # Downloading
 # ---------------------------------------------------------------------------
 
+def _cif_to_pdb_bytes(pdb_id: str, cif_bytes: bytes) -> bytes:
+    """Convert mmCIF bytes to legacy PDB-format bytes via BioPython.
+
+    Used as a fallback for entries whose .pdb file is no longer served by
+    RCSB (typically structures deposited after the PDB format deprecation).
+    BioPython's MMCIFParser → PDBIO round-trip preserves ATOM/HETATM records
+    consistently with the rest of the pipeline's PDBParser.
+    """
+    from Bio import PDB
+
+    with tempfile.NamedTemporaryFile(suffix=".cif", delete=False) as tmp:
+        tmp.write(cif_bytes)
+        tmp_path = Path(tmp.name)
+
+    try:
+        parser = PDB.MMCIFParser(QUIET=True)
+        structure = parser.get_structure(pdb_id, str(tmp_path))
+        buf = io.StringIO()
+        pdb_io = PDB.PDBIO()
+        pdb_io.set_structure(structure)
+        pdb_io.save(buf)
+        return buf.getvalue().encode("utf-8")
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
 def download_pdb(
     pdb_id: str,
     dest_dir: Path = RAW_DIR,
     delay: float = 0.05,
 ) -> Path:
-    """Download a single PDB file from RCSB.
+    """Download a single PDB file from RCSB, with CIF fallback.
 
-    Skips download if the file already exists locally.
+    Tries the legacy .pdb URL first.  If RCSB returns 404 (common for
+    entries deposited after ~2024 that only exist in mmCIF format), falls
+    back to downloading the .cif file and converting it to PDB format via
+    BioPython before saving.  Skips download if the file already exists.
 
     Parameters
     ----------
     pdb_id : str
-        Four-character PDB ID (case-insensitive).
+        PDB ID (case-insensitive).
     dest_dir : Path
         Directory to save the file.
     delay : float
@@ -157,7 +189,7 @@ def download_pdb(
     Returns
     -------
     Path
-        Path to the downloaded (or pre-existing) file.
+        Path to the downloaded (or pre-existing) .pdb file.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"{pdb_id.lower()}.pdb"
@@ -166,8 +198,19 @@ def download_pdb(
 
     url = RCSB_DOWNLOAD_URL.format(pdb_id=pdb_id.upper())
     resp = requests.get(url, timeout=60)
-    resp.raise_for_status()
-    dest.write_bytes(resp.content)
+
+    if resp.status_code == 404:
+        logger.debug("%s: .pdb not found, trying .cif fallback.", pdb_id)
+        cif_url = RCSB_CIF_DOWNLOAD_URL.format(pdb_id=pdb_id.upper())
+        resp = requests.get(cif_url, timeout=60)
+        resp.raise_for_status()
+        pdb_bytes = _cif_to_pdb_bytes(pdb_id, resp.content)
+        dest.write_bytes(pdb_bytes)
+        logger.debug("%s: converted from CIF → %s", pdb_id, dest)
+    else:
+        resp.raise_for_status()
+        dest.write_bytes(resp.content)
+
     time.sleep(delay)
     return dest
 
