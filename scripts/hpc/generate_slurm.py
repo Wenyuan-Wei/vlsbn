@@ -24,7 +24,8 @@ Usage
         --walltime-process 4:00:00 \\
         --walltime-merge   2:00:00 \\
         --mem-process 4G         \\
-        --getcontacts ~/getcontacts/get_static_contacts.py
+        --getcontacts ~/getcontacts/get_static_contacts.py \\
+        --conda-init  mycondainit   # optional: alias needed before conda activate
 
 Then on the HPC:
     cd ~/Project_VLS_BN
@@ -70,6 +71,10 @@ def parse_args() -> argparse.Namespace:
                    help="Output directory for generated scripts")
     p.add_argument("--max-array-tasks",  type=int, default=2000,
                    help="Hard cap on simultaneous array tasks (cluster courtesy)")
+    p.add_argument("--conda-init",       default=None,
+                   help="Alias or command required by your HPC to initialise conda "
+                        "before 'conda activate' (e.g. 'mycondainit'). "
+                        "Run after 'source ~/.bashrc'. Omit if not needed.")
     p.add_argument("--dry-run",          action="store_true",
                    help="Embed --dry-run in 01_process.sh so the array job reports "
                         "its batch plan without downloading or writing any data")
@@ -80,8 +85,14 @@ def _account_line(account: str | None) -> str:
     return f"#SBATCH --account={account}" if account else ""
 
 
+def _conda_init_line(conda_init: str | None) -> str:
+    """Return the conda-init command line (with trailing newline) or empty string."""
+    return f"{conda_init}\n        " if conda_init else ""
+
+
 def write_fetch_ids(args: argparse.Namespace, out_dir: Path) -> None:
     account = _account_line(args.account)
+    conda_init = _conda_init_line(args.conda_init)
     script = textwrap.dedent(f"""\
         #!/bin/bash
         #SBATCH --job-name=vlsbn_fetch
@@ -96,7 +107,7 @@ def write_fetch_ids(args: argparse.Namespace, out_dir: Path) -> None:
 
         # ---------- environment ----------
         source ~/.bashrc
-        conda activate {args.conda_env}
+        {conda_init}conda activate {args.conda_env}
         export GETCONTACTS_PATH={args.getcontacts}
 
         cd ${{SLURM_SUBMIT_DIR:-$HOME/Project_VLS_BN}}
@@ -133,6 +144,7 @@ def write_fetch_ids(args: argparse.Namespace, out_dir: Path) -> None:
 
 def write_process(args: argparse.Namespace, out_dir: Path) -> None:
     account = _account_line(args.account)
+    conda_init = _conda_init_line(args.conda_init)
     dry_run_flag = " \\\n            --dry-run" if args.dry_run else ""
     # Array range is set dynamically by 00_fetch_ids.sh; this template uses
     # a placeholder that sbatch --array overrides at submission time.
@@ -152,7 +164,7 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
 
         # ---------- environment ----------
         source ~/.bashrc
-        conda activate {args.conda_env}
+        {conda_init}conda activate {args.conda_env}
         export GETCONTACTS_PATH={args.getcontacts}
 
         cd ${{SLURM_SUBMIT_DIR:-$HOME/Project_VLS_BN}}
@@ -173,6 +185,7 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
 
 def write_merge_train(args: argparse.Namespace, out_dir: Path) -> None:
     account = _account_line(args.account)
+    conda_init = _conda_init_line(args.conda_init)
     script = textwrap.dedent(f"""\
         #!/bin/bash
         #SBATCH --job-name=vlsbn_merge
@@ -187,7 +200,7 @@ def write_merge_train(args: argparse.Namespace, out_dir: Path) -> None:
 
         # ---------- environment ----------
         source ~/.bashrc
-        conda activate {args.conda_env}
+        {conda_init}conda activate {args.conda_env}
 
         cd ${{SLURM_SUBMIT_DIR:-$HOME/Project_VLS_BN}}
         mkdir -p data/models data/processed
@@ -231,6 +244,7 @@ def main() -> None:
     print(f"  batch size   = {args.batch_size} PDBs/task")
     print(f"  max parallel = {args.max_array_tasks} simultaneous tasks")
     print(f"  getcontacts  = {args.getcontacts}")
+    print(f"  conda-init   = {args.conda_init or '(none)'}")
     if args.dry_run:
         print()
         print("  *** DRY-RUN MODE: 01_process.sh will report batch plans only,")
