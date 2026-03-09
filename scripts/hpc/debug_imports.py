@@ -54,10 +54,6 @@ TESTS: list[tuple[str, str]] = [
     ("rdkit.Chem.rdchem (used in atomtypes.py)",
      "from rdkit.Chem import rdchem; print('ok')"),
 
-    # --- vmd-python (installed but not directly imported by our code) ---
-    ("vmd-python",
-     "import vmd; print('ok')"),
-
     # --- project modules (in import order) ---
     ("vlsbn.constants",
      f"import sys; sys.path.insert(0, {REPO_ROOT!r}); "
