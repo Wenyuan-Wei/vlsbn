@@ -16,9 +16,9 @@ dependencies:
   - cython
   - pyarrow
   - pytest
+  - conda-forge::rdkit        # pip rdkit segfaults on many HPC Linux nodes
   - pip
   - pip:
       - biopython
-      - rdkit
       - requests
       - vmd-python
