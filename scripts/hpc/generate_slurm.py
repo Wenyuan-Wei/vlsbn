@@ -67,6 +67,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--getcontacts",
                    default="~/getcontacts/get_static_contacts.py",
                    help="Full path to get_static_contacts.py on the HPC")
+    p.add_argument("--getcontacts-python",
+                   default=None,
+                   help="Python binary used to run getcontacts (e.g. "
+                        "~/anaconda3/envs/vmd-python/bin/python). "
+                        "Defaults to the active interpreter. Use this when "
+                        "vmd-python lives in a separate conda env.")
     p.add_argument("--out-dir",          type=Path, default=Path("slurm"),
                    help="Output directory for generated scripts")
     p.add_argument("--max-array-tasks",  type=int, default=2000,
@@ -146,6 +152,8 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
     account = _account_line(args.account)
     conda_init = _conda_init_line(args.conda_init)
     dry_run_flag = " \\\n            --dry-run" if args.dry_run else ""
+    gc_python = args.getcontacts_python or "python"
+    gc_python_export = f"export GETCONTACTS_PYTHON={gc_python}"
     # Array range is set dynamically by 00_fetch_ids.sh; this template uses
     # a placeholder that sbatch --array overrides at submission time.
     script = textwrap.dedent(f"""\
@@ -166,6 +174,7 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
         source ~/.bashrc
         {conda_init}conda activate {args.conda_env}
         export GETCONTACTS_PATH={args.getcontacts}
+        {gc_python_export}
 
         cd ${{SLURM_SUBMIT_DIR:-$HOME/Project_VLS_BN}}
 
@@ -244,6 +253,7 @@ def main() -> None:
     print(f"  batch size   = {args.batch_size} PDBs/task")
     print(f"  max parallel = {args.max_array_tasks} simultaneous tasks")
     print(f"  getcontacts  = {args.getcontacts}")
+    print(f"  gc python    = {args.getcontacts_python or '(active interpreter)'}")
     print(f"  conda-init   = {args.conda_init or '(none)'}")
     if args.dry_run:
         print()

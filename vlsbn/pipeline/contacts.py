@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 from collections import defaultdict
 from itertools import product
@@ -43,6 +44,11 @@ logger = logging.getLogger(__name__)
 GETCONTACTS_SCRIPT = os.environ.get(
     "GETCONTACTS_PATH", "get_static_contacts.py"
 )
+
+# Python interpreter used to run getcontacts. Defaults to the current
+# interpreter but can be overridden to point at a separate conda env that
+# has vmd-python installed (e.g. ~/anaconda3/envs/vmd-python/bin/python).
+GETCONTACTS_PYTHON = os.environ.get("GETCONTACTS_PYTHON", sys.executable)
 
 # Feature column sentinel for missing triplets
 _ZERO = 0.0
@@ -113,7 +119,7 @@ def _run_getcontacts(
         out_path = Path(tmp.name)
 
     cmd = [
-        "python", GETCONTACTS_SCRIPT,
+        GETCONTACTS_PYTHON, GETCONTACTS_SCRIPT,
         "--structure",  str(pdb_path),
         "--output",     str(out_path),
         "--itypes",     *itypes,
