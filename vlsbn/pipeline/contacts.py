@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 from collections import defaultdict
 from itertools import product
@@ -33,7 +34,7 @@ import numpy as np
 from scipy.spatial.distance import cdist
 
 from vlsbn.constants import INTERACTION_TYPES, SHELL_RADIUS
-from vlsbn.pipeline.atomtypes import PROTEIN_ATOM_TYPES
+from vlsbn.pipeline.atomtypes import LIGAND_ATOM_TYPES, PROTEIN_ATOM_TYPES
 from vlsbn.pipeline.parse import AtomRecord, ParsedComplex
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,11 @@ logger = logging.getLogger(__name__)
 GETCONTACTS_SCRIPT = os.environ.get(
     "GETCONTACTS_PATH", "get_static_contacts.py"
 )
+
+# Python interpreter used to run getcontacts. Defaults to the current
+# interpreter but can be overridden to point at a separate conda env that
+# has vmd-python installed (e.g. ~/anaconda3/envs/vmd-python/bin/python).
+GETCONTACTS_PYTHON = os.environ.get("GETCONTACTS_PYTHON", sys.executable)
 
 # Feature column sentinel for missing triplets
 _ZERO = 0.0
@@ -113,7 +119,7 @@ def _run_getcontacts(
         out_path = Path(tmp.name)
 
     cmd = [
-        "python", GETCONTACTS_SCRIPT,
+        GETCONTACTS_PYTHON, GETCONTACTS_SCRIPT,
         "--structure",  str(pdb_path),
         "--output",     str(out_path),
         "--itypes",     *itypes,
@@ -273,10 +279,9 @@ def compute_features(
         observed[(ptype, ltype, itype)] += 1
 
     # --- Step 3: compute density and build feature dict ---
-    # Collect all ligand types present in this complex
-    lig_types = {a.atom_type for a in complex_.ligand_atoms}
-
-    for ptype, ltype, itype in product(PROTEIN_ATOM_TYPES, lig_types, itypes):
+    # Use the fixed LIGAND_ATOM_TYPES vocabulary so the feature matrix always
+    # has the same columns regardless of which complexes are in the dataset.
+    for ptype, ltype, itype in product(PROTEIN_ATOM_TYPES, LIGAND_ATOM_TYPES, itypes):
         key = f"{ptype}__{ltype}__{itype}"
         denom = possible.get((ptype, ltype), 0)
         if denom == 0:

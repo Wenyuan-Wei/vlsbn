@@ -76,7 +76,18 @@ def main() -> None:
 
     feature_cols = [c for c in df.columns if c not in _META_COLS]
     feature_df   = df[feature_cols].copy()
-    logger.info("Feature matrix: %d complexes × %d nodes.", *feature_df.shape)
+    logger.info("Feature matrix (raw): %d complexes × %d nodes.", *feature_df.shape)
+
+    # Drop constant columns — features whose value never varies across the
+    # training set carry zero information and cause MI = 0 for all edges
+    # touching them, which adds noise to BaNDyT's structure search.
+    constant_mask = feature_df.nunique() <= 1
+    n_dropped = int(constant_mask.sum())
+    feature_df = feature_df.loc[:, ~constant_mask]
+    logger.info(
+        "Dropped %d constant column(s) → %d informative features remain.",
+        n_dropped, feature_df.shape[1],
+    )
 
     # ------------------------------------------------------------------ #
     # Train BN                                                             #
