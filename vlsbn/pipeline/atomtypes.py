@@ -21,10 +21,19 @@ O_neg   negatively charged O (Asp OD1/OD2, Glu OE1/OE2, C-term OXT)
 S_sul   sulfur             (Cys SG, Met SD)
 OTHER   any atom not covered by the above (metals, phosphorus, halogens, etc.)
 
-Ligand atom-type vocabulary (generated dynamically)
-----------------------------------------------------
-Format: {element}_{hybridisation}[_aro][_pos|_neg]
-Examples: C_3, C_2, C_aro, N_3_pos, O_2, S_3, F, Cl, Br, I, P_3, X (other)
+Ligand atom-type vocabulary (fixed)
+------------------------------------
+C_ali   aliphatic / sp2 non-aromatic carbon  (sp3 and sp2 carbons collapsed)
+C_aro   aromatic carbon
+N_ali   neutral non-aromatic nitrogen        (sp3 and sp2 collapsed)
+N_aro   aromatic nitrogen
+N_pos   positively charged nitrogen          (ammonium, guanidinium, etc.)
+O_ali   sp3 oxygen                           (hydroxyl, ether)
+O_car   sp2 / carbonyl oxygen                (ketone, ester, amide C=O; furan O)
+O_neg   negatively charged oxygen            (carboxylate, phosphate O-)
+S       any sulfur                           (thiol, thioether, thiophene, etc.)
+Hal     halogens                             (F, Cl, Br, I)
+X       everything else                      (P, metals, exotic elements)
 """
 
 from __future__ import annotations
@@ -132,47 +141,64 @@ def get_protein_atom_type(resname: str, atom_name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Ligand atom typing — RDKit-based
+# Ligand atom typing — RDKit-based, fixed vocabulary
 # ---------------------------------------------------------------------------
 
-_HYBRID_LABEL: dict[rdchem.HybridizationType, str] = {
-    rdchem.HybridizationType.SP3: "3",
-    rdchem.HybridizationType.SP2: "2",
-    rdchem.HybridizationType.SP:  "1",
-}
+# Fixed ligand atom-type vocabulary.  compute_features iterates over this
+# tuple so the feature matrix always has the same columns regardless of
+# which complexes are in the training set.
+LIGAND_ATOM_TYPES: tuple[str, ...] = (
+    "C_ali",  # aliphatic / sp2 non-aromatic carbon
+    "C_aro",  # aromatic carbon
+    "N_ali",  # neutral non-aromatic nitrogen
+    "N_aro",  # aromatic nitrogen
+    "N_pos",  # positively charged nitrogen
+    "O_ali",  # sp3 oxygen (hydroxyl, ether)
+    "O_car",  # sp2 / carbonyl oxygen
+    "O_neg",  # negatively charged oxygen
+    "S",      # any sulfur
+    "Hal",    # halogens (F, Cl, Br, I)
+    "X",      # everything else (P, metals, exotic)
+)
 
-# Elements for which we encode hybridisation + charge
-_TYPED_ELEMENTS: frozenset[int] = frozenset({6, 7, 8, 16, 15})  # C N O S P
-
-# Elements that are just reported as their symbol
-_HALOGEN_NUMS: dict[int, str] = {9: "F", 17: "Cl", 35: "Br", 53: "I"}
-
-_ELEMENT_SYMBOL: dict[int, str] = {
-    6: "C", 7: "N", 8: "O", 16: "S", 15: "P",
-}
+_HALOGEN_ATOMIC_NUMS: frozenset[int] = frozenset({9, 17, 35, 53})  # F Cl Br I
+_ORGANIC_ATOMIC_NUMS: frozenset[int] = frozenset({6, 7, 8, 16})    # C N O S
+# Phosphorus (15) is intentionally excluded → maps to "X"
 
 
 def get_ligand_atom_type(atom: rdchem.Atom) -> str:
-    """Return the ligand atom-type string for an RDKit atom.
+    """Return the vocabulary ligand atom-type for an RDKit atom.
 
-    Type format: {element}_{hybridisation}[_aro][_pos|_neg]
-    Halogens   : element symbol only (F, Cl, Br, I)
-    Other      : "X{atomic_num}" (metals, unusual elements)
+    Returns one of the strings in LIGAND_ATOM_TYPES.
     """
     anum = atom.GetAtomicNum()
 
-    if anum in _HALOGEN_NUMS:
-        return _HALOGEN_NUMS[anum]
+    if anum in _HALOGEN_ATOMIC_NUMS:
+        return "Hal"
 
-    if anum not in _TYPED_ELEMENTS:
-        return f"X{anum}"
-
-    elem = _ELEMENT_SYMBOL[anum]
+    if anum not in _ORGANIC_ATOMIC_NUMS:
+        return "X"  # phosphorus, metals, exotic elements
 
     if atom.GetIsAromatic():
-        return f"{elem}_aro"
+        return "C_aro" if anum == 6 else "N_aro" if anum == 7 else "O_car"
 
-    hybrid = _HYBRID_LABEL.get(atom.GetHybridization(), "x")
     charge = atom.GetFormalCharge()
-    suffix = "_pos" if charge > 0 else ("_neg" if charge < 0 else "")
-    return f"{elem}_{hybrid}{suffix}"
+
+    if anum == 6:   # carbon
+        return "C_ali"
+
+    if anum == 7:   # nitrogen
+        if charge > 0:
+            return "N_pos"
+        return "N_ali"
+
+    if anum == 8:   # oxygen
+        if charge < 0:
+            return "O_neg"
+        hyb = atom.GetHybridization()
+        if hyb == rdchem.HybridizationType.SP3:
+            return "O_ali"
+        return "O_car"  # sp2 carbonyl / ester / amide O
+
+    # anum == 16: sulfur
+    return "S"

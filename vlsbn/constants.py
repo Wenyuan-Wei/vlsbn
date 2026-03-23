@@ -57,21 +57,53 @@ N_STATES = 4
 MAX_RESOLUTION = 2.5   # Å  — X-ray resolution upper bound
 MAX_RFREE      = 0.35  # Rₓ — R-free upper bound
 
+# Minimum number of heavy atoms a HETATM residue must have to be considered
+# a drug-like ligand.  Ions, solvents, and tiny fragments are rejected below
+# this threshold before the artifact-name list is even consulted.
+MIN_LIGAND_HEAVY_ATOMS: int = 6
+
 # HETATM residue codes excluded as crystallographic artifacts / solvent / ions.
-# Extend this list as needed during data exploration.
 ARTIFACT_LIGANDS: frozenset[str] = frozenset({
-    # Solvents & cryoprotectants
+    # --- Standard amino acids appearing as HETATM (free AA in solution, etc.) ---
+    "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY",
+    "HIS", "ILE", "LEU", "LYS", "MET", "PHE", "PRO", "SER",
+    "THR", "TRP", "TYR", "VAL",
+    # D-amino acids
+    "DAL", "DAR", "DSG", "DAS", "DCY", "DGL", "DGN", "DGL",
+    "DHI", "DIL", "DLE", "DLY", "MED", "DPN", "DPR", "DSN",
+    "DTH", "DTR", "DTY", "DVA",
+
+    # --- Solvents & cryoprotectants ---
     "GOL", "EDO", "PEG", "EOH", "MPD", "DMS", "ACE", "ACT", "FMT",
-    "HEZ", "PGE", "BOG",
-    # Buffers
-    "EPE", "MES", "TRS", "NH4", "IMD",
-    # Inorganic ions
+    "HEZ", "PGE", "BOG", "ETA", "MOH", "IPA", "ACN", "TFE", "BTN",
+    "PGO", "DOD", "THF", "DCM", "DIO", "CCN", "DMF", "P33", "PE4",
+    "PE5", "PE6", "PE7", "PE8", "P6G", "PG4",
+
+    # --- Buffers & crystallisation additives ---
+    "EPE", "MES", "TRS", "NH4", "IMD", "BIS", "CAPS", "CHES",
+    "PIPES", "TMP", "GAI", "TAM", "TCN",
+
+    # --- Inorganic ions (single-atom or simple polyatomic) ---
     "CL", "NA", "MG", "ZN", "CA", "K", "MN", "FE", "CU", "CO",
-    "NI", "CD", "IOD", "BR", "SO4", "PO4", "AZI",
-    # Modified amino-acid residues (non-standard but not drug-like)
+    "NI", "CD", "IOD", "BR", "SO4", "PO4", "AZI", "CS", "RB",
+    "SR", "BA", "AU", "AG", "PT", "HG", "PB", "NO3", "NO2",
+    "SCN", "CLO", "SMO", "VO4", "ACY", "FLC", "LI",
+
+    # --- Modified / non-standard amino-acid residues ---
     "MSE", "SEP", "TPO", "PTR", "MLY", "OCS", "CME", "CSD",
-    "CSX", "YCM", "KCX", "ALY", "LLP", "PLP", "SEC",
-    # Catch-alls
+    "CSX", "YCM", "KCX", "ALY", "LLP", "PLP", "SEC", "CGU",
+    "HYP", "FME", "MVA", "DIV",
+
+    # --- Glycans & sugars (glycosylation on protein surface) ---
+    "NAG", "BMA", "MAN", "FUC", "GAL", "BGC", "XYP", "NDG",
+    "NAE", "SIA", "FCA", "A2G", "LAT", "RIB", "GLA", "GLC",
+    "GXL", "GNS", "IDR", "SHB", "LFR", "AFL",
+
+    # --- Lipids / fatty acids used as crystallisation agents ---
+    "OLC", "PLM", "STE", "OLA", "LDA", "LPP", "LMT", "LMU",
+    "LMR", "PGV",
+
+    # --- Catch-alls ---
     "UNK", "UNL",
 })
 

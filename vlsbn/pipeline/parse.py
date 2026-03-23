@@ -23,7 +23,7 @@ from Bio import PDB
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-from vlsbn.constants import ARTIFACT_LIGANDS
+from vlsbn.constants import ARTIFACT_LIGANDS, MIN_LIGAND_HEAVY_ATOMS
 from vlsbn.pipeline.atomtypes import get_ligand_atom_type, get_protein_atom_type
 
 logger = logging.getLogger(__name__)
@@ -206,6 +206,14 @@ def parse_pdb(pdb_path: Path) -> list[ParsedComplex]:
             if resname in ("HOH", "WAT"):
                 continue
             if resname in ARTIFACT_LIGANDS:
+                continue
+
+            # Reject tiny molecules (ions, solvents) by heavy-atom count
+            n_heavy = sum(
+                1 for a in residue.get_atoms()
+                if (a.element or "").strip().upper() != "H"
+            )
+            if n_heavy < MIN_LIGAND_HEAVY_ATOMS:
                 continue
 
             ligand_id = f"{resname}_{chain.get_id()}_{resseq}"
