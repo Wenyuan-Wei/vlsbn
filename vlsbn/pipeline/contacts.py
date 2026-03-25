@@ -148,10 +148,16 @@ def _run_getcontacts(
             if not line or line.startswith("#"):
                 continue
             parts = line.split("\t")
-            if len(parts) < 3:
+            if len(parts) < 4:
                 continue
-            # Format: frame  itype  atom1  atom2
-            itype, atom1, atom2 = parts[1], parts[2], parts[3]
+            itype = parts[1]
+            if itype == "hb" and len(parts) >= 5:
+                # hb format: frame  hb  donor_heavy  hydrogen  acceptor_heavy
+                # parts[3] is the H atom (not indexed); use donor + acceptor
+                atom1, atom2 = parts[2], parts[4]
+            else:
+                # All other itypes: frame  itype  atom1  atom2
+                atom1, atom2 = parts[2], parts[3]
             contacts.append((itype, atom1, atom2))
 
     out_path.unlink(missing_ok=True)
