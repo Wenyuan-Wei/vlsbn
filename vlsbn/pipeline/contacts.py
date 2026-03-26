@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -52,6 +53,59 @@ GETCONTACTS_PYTHON = os.environ.get("GETCONTACTS_PYTHON", sys.executable)
 
 # Feature column sentinel for missing triplets
 _ZERO = 0.0
+
+# Detect H-addition tools once at import time.
+_OBABEL = shutil.which("obabel")
+_REDUCE = shutil.which("reduce")
+
+
+# ---------------------------------------------------------------------------
+# Hydrogen addition
+# ---------------------------------------------------------------------------
+
+def _add_hydrogens(pdb_path: Path, dest: Path) -> bool:
+    """Add explicit H atoms to a PDB file using obabel or reduce.
+
+    X-ray crystal structures lack explicit H atoms, which prevents
+    getcontacts (VMD measure hbonds) from detecting hydrogen bonds.
+    This function protonates the structure before contact detection.
+
+    Tries ``obabel`` first (conda-forge::openbabel), then falls back
+    to ``reduce`` (AmberTools).  Returns True if protonation succeeded,
+    False if neither tool is available (HB detection will yield zero
+    contacts but the pipeline continues).
+    """
+    if _OBABEL:
+        try:
+            result = subprocess.run(
+                [_OBABEL, str(pdb_path), "-O", str(dest), "-h", "--quiet"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+                return True
+            logger.debug("obabel returned %d: %s", result.returncode, result.stderr[:200])
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            logger.debug("obabel failed: %s", exc)
+
+    if _REDUCE:
+        try:
+            result = subprocess.run(
+                [_REDUCE, str(pdb_path)],
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode in (0, 1) and result.stdout.strip():
+                # reduce exits 1 when it adds H but encounters warnings — that's ok
+                dest.write_text(result.stdout)
+                return True
+            logger.debug("reduce returned %d: %s", result.returncode, result.stderr[:200])
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            logger.debug("reduce failed: %s", exc)
+
+    logger.warning(
+        "Neither obabel nor reduce found — HB contacts will be zero.  "
+        "Install with: conda install conda-forge::openbabel"
+    )
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +317,12 @@ def compute_features(
     with tempfile.TemporaryDirectory() as tmpdir:
         pdb_path = Path(tmpdir) / f"{complex_.ligand_id}.pdb"
         _write_temp_pdb(complex_, pdb_path)
+
+        # Protonate before calling getcontacts so VMD measure hbonds can
+        # find donor-H...acceptor triplets (crystal PDBs have no H atoms).
+        h_pdb = Path(tmpdir) / f"{complex_.ligand_id}_h.pdb"
+        if _add_hydrogens(pdb_path, h_pdb):
+            pdb_path = h_pdb
 
         prot_name_idx = _atom_name_to_index(complex_.protein_atoms)
         lig_name_idx  = _atom_name_to_index(complex_.ligand_atoms)
