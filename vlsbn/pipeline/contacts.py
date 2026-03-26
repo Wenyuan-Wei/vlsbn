@@ -54,8 +54,7 @@ GETCONTACTS_PYTHON = os.environ.get("GETCONTACTS_PYTHON", sys.executable)
 # Feature column sentinel for missing triplets
 _ZERO = 0.0
 
-# Detect H-addition tools once at import time.
-_OBABEL = shutil.which("obabel")
+# reduce subprocess fallback (AmberTools); detected once at import time.
 _REDUCE = shutil.which("reduce")
 
 
@@ -64,29 +63,53 @@ _REDUCE = shutil.which("reduce")
 # ---------------------------------------------------------------------------
 
 def _add_hydrogens(pdb_path: Path, dest: Path) -> bool:
-    """Add explicit H atoms to a PDB file using obabel or reduce.
+    """Add explicit H atoms to a PDB file.
 
     X-ray crystal structures lack explicit H atoms, which prevents
     getcontacts (VMD measure hbonds) from detecting hydrogen bonds.
     This function protonates the structure before contact detection.
 
-    Tries ``obabel`` first (conda-forge::openbabel), then falls back
-    to ``reduce`` (AmberTools).  Returns True if protonation succeeded,
-    False if neither tool is available (HB detection will yield zero
-    contacts but the pipeline continues).
-    """
-    if _OBABEL:
-        try:
-            result = subprocess.run(
-                [_OBABEL, str(pdb_path), "-O", str(dest), "-h", "--quiet"],
-                capture_output=True, text=True, timeout=60,
-            )
-            if result.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
-                return True
-            logger.debug("obabel returned %d: %s", result.returncode, result.stderr[:200])
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            logger.debug("obabel failed: %s", exc)
+    Strategy
+    --------
+    1. RDKit (primary) — already a project dependency; no extra installs.
+    2. ``reduce`` subprocess (fallback) — AmberTools; HPC module or
+       ``conda install -c conda-forge ambertools``.
 
+    Note: ``openbabel`` is intentionally NOT used here.  Installing
+    ``conda-forge::openbabel`` introduces shared-library conflicts with
+    rdkit on many HPC Linux nodes, causing Python segfaults at import time.
+
+    Returns True if protonation succeeded, False otherwise (HB features
+    will be zero but the pipeline continues without crashing).
+    """
+    # --- Primary: RDKit ---
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+
+        mol = Chem.MolFromPDBFile(str(pdb_path), removeHs=False, sanitize=False)
+        if mol is None:
+            raise ValueError("MolFromPDBFile returned None")
+        # Partial sanitisation: ring perception + valence (skip aromaticity
+        # to avoid failures on unusual ligand/metal residues).
+        Chem.SanitizeMol(
+            mol,
+            Chem.SanitizeFlags.SANITIZE_FINDRADICALS
+            | Chem.SanitizeFlags.SANITIZE_SETAROMATICITY
+            | Chem.SanitizeFlags.SANITIZE_SETCONJUGATION
+            | Chem.SanitizeFlags.SANITIZE_SETHYBRIDIZATION
+            | Chem.SanitizeFlags.SANITIZE_SYMMRINGS,
+            catchErrors=True,
+        )
+        mol_h = AllChem.AddHs(mol, addCoords=True)
+        Chem.MolToPDBFile(mol_h, str(dest))
+        if dest.exists() and dest.stat().st_size > 0:
+            return True
+        logger.debug("RDKit wrote empty PDB for %s", pdb_path.name)
+    except Exception as exc:
+        logger.debug("RDKit H addition failed for %s: %s", pdb_path.name, exc)
+
+    # --- Fallback: reduce subprocess ---
     if _REDUCE:
         try:
             result = subprocess.run(
@@ -94,7 +117,7 @@ def _add_hydrogens(pdb_path: Path, dest: Path) -> bool:
                 capture_output=True, text=True, timeout=60,
             )
             if result.returncode in (0, 1) and result.stdout.strip():
-                # reduce exits 1 when it adds H but encounters warnings — that's ok
+                # reduce exits 1 when it adds H but encounters warnings — ok
                 dest.write_text(result.stdout)
                 return True
             logger.debug("reduce returned %d: %s", result.returncode, result.stderr[:200])
@@ -102,8 +125,10 @@ def _add_hydrogens(pdb_path: Path, dest: Path) -> bool:
             logger.debug("reduce failed: %s", exc)
 
     logger.warning(
-        "Neither obabel nor reduce found — HB contacts will be zero.  "
-        "Install with: conda install conda-forge::openbabel"
+        "H addition failed for %s — HB contacts will be zero.  "
+        "If RDKit failed, try loading reduce: module load ambertools  "
+        "or: conda install -c conda-forge ambertools",
+        pdb_path.name,
     )
     return False
 

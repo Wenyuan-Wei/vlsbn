@@ -17,7 +17,6 @@ dependencies:
   - pyarrow
   - pytest
   - conda-forge::rdkit        # pip rdkit segfaults on many HPC Linux nodes
-  - conda-forge::openbabel    # adds H atoms to PDB before getcontacts HB detection
   - pip
   - pip:
       - biopython

@@ -26,7 +26,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from vlsbn.pipeline.contacts import (
     GETCONTACTS_PYTHON,
     GETCONTACTS_SCRIPT,
-    _OBABEL,
     _REDUCE,
     _add_hydrogens,
     _run_getcontacts,
@@ -80,8 +79,8 @@ def main() -> None:
     # Step 2: Write temp PDB, add H atoms, run getcontacts (hb only)     #
     # ------------------------------------------------------------------ #
     print(f"\n=== H-addition tools ===")
-    print(f"  obabel : {_OBABEL or '*** NOT FOUND — install conda-forge::openbabel ***'}")
-    print(f"  reduce : {_REDUCE or 'not found'}")
+    print(f"  rdkit  : available (primary)")
+    print(f"  reduce : {_REDUCE or 'not found (fallback only)'}")
 
     tmpdir = tempfile.mkdtemp()
     pdb_path = Path(tmpdir) / f"{c.ligand_id}.pdb"
