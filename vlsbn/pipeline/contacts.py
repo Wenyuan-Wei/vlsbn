@@ -151,10 +151,11 @@ def _run_getcontacts(
             if len(parts) < 4:
                 continue
             itype = parts[1]
-            if itype == "hb" and len(parts) >= 5:
-                # hb format: frame  hb  donor_heavy  hydrogen  acceptor_heavy
+            if itype.startswith("hb") and len(parts) >= 5:
+                # hb* format: frame  hbbb/hbss/hbsb  donor_heavy  hydrogen  acceptor_heavy
                 # parts[3] is the H atom (not indexed); use donor + acceptor
                 atom1, atom2 = parts[2], parts[4]
+                itype = "hb"  # normalise subtypes → single "hb" feature column
             else:
                 # All other itypes: frame  itype  atom1  atom2
                 atom1, atom2 = parts[2], parts[3]
