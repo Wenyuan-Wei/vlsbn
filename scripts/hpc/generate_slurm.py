@@ -135,20 +135,49 @@ def write_fetch_ids(args: argparse.Namespace, out_dir: Path) -> None:
         echo "[$(date)] $N_IDS IDs → $N_TASKS array tasks (batch=$BATCH)"
         echo "$N_TASKS" > data/n_expected_chunks.txt
 
-        # ---------- Stage 1: submit array job ----------
-        JOB1=$(sbatch --parsable \\
-            --chdir=${{SLURM_SUBMIT_DIR}} \\
-            --array=0-${{LAST}}%{args.max_array_tasks} \\
-            slurm/01_process.sh)
-        echo "[$(date)] Submitted process array: job $JOB1 ($N_TASKS tasks)"
+        # ---------- Detect missing chunks (resume support) ----------
+        N_EXISTING=$(ls data/chunks/chunk_*.parquet 2>/dev/null | wc -l)
 
-        # ---------- Stage 2: submit merge+train, dependent on array ----------
-        {"# afterok: abort merge if any task failed (--strict mode)" if args.strict else "# afterany: merge runs on whatever chunks exist; merge script warns about missing ones"}
-        JOB2=$(sbatch --parsable \\
-            --chdir=${{SLURM_SUBMIT_DIR}} \\
-            --dependency={"afterok" if args.strict else "afterany"}:${{JOB1}} \\
-            slurm/02_merge_train.sh)
-        echo "[$(date)] Submitted merge+train: job $JOB2 (waits for $JOB1)"
+        if [ "$N_EXISTING" -ge "$N_TASKS" ]; then
+            echo "[$(date)] All $N_TASKS chunk(s) already exist — skipping array job."
+            MISSING=""
+        elif [ "$N_EXISTING" -eq 0 ]; then
+            echo "[$(date)] No existing chunks — submitting full array (0-$LAST)."
+            MISSING="0-$LAST"
+        else
+            echo "[$(date)] $N_EXISTING / $N_TASKS chunk(s) found — detecting missing tasks…"
+            MISSING=""
+            for i in $(seq 0 $LAST); do
+                if [ ! -f "$(printf 'data/chunks/chunk_%05d.parquet' $i)" ]; then
+                    MISSING="${{MISSING:+${{MISSING}},}}$i"
+                fi
+            done
+            N_MISSING=$(echo "$MISSING" | tr ',' '\\n' | wc -l)
+            echo "[$(date)] $N_MISSING missing task(s) to rerun."
+        fi
+
+        # ---------- Stage 1: submit array job (only missing tasks) ----------
+        if [ -n "$MISSING" ]; then
+            JOB1=$(sbatch --parsable \\
+                --chdir=${{SLURM_SUBMIT_DIR}} \\
+                --array=${{MISSING}}%{args.max_array_tasks} \\
+                slurm/01_process.sh)
+            echo "[$(date)] Submitted process array: job $JOB1 (tasks: $MISSING)"
+
+            # ---------- Stage 2: submit merge+train, dependent on array ----------
+            {"# afterok: abort merge if any task failed (--strict mode)" if args.strict else "# afterany: merge runs on whatever chunks exist; merge script warns about missing ones"}
+            JOB2=$(sbatch --parsable \\
+                --chdir=${{SLURM_SUBMIT_DIR}} \\
+                --dependency={"afterok" if args.strict else "afterany"}:${{JOB1}} \\
+                slurm/02_merge_train.sh)
+            echo "[$(date)] Submitted merge+train: job $JOB2 (waits for $JOB1)"
+        else
+            # All chunks present — submit merge immediately with no dependency
+            JOB2=$(sbatch --parsable \\
+                --chdir=${{SLURM_SUBMIT_DIR}} \\
+                slurm/02_merge_train.sh)
+            echo "[$(date)] Submitted merge+train: job $JOB2 (no array dependency)"
+        fi
 
         echo "[$(date)] All stages submitted.  Monitor with: squeue -u $USER"
     """).rstrip()
