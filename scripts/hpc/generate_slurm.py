@@ -84,6 +84,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dry-run",          action="store_true",
                    help="Embed --dry-run in 01_process.sh so the array job reports "
                         "its batch plan without downloading or writing any data")
+    p.add_argument("--strict",           action="store_true",
+                   help="Use afterok dependency: merge job only runs if ALL array "
+                        "tasks exit 0.  Default (no flag): use afterany so merge "
+                        "runs on whatever chunks exist and warns about missing ones.")
     return p.parse_args()
 
 
@@ -129,16 +133,20 @@ def write_fetch_ids(args: argparse.Namespace, out_dir: Path) -> None:
         N_TASKS=$(( (N_IDS + BATCH - 1) / BATCH ))
         LAST=$(( N_TASKS - 1 ))
         echo "[$(date)] $N_IDS IDs → $N_TASKS array tasks (batch=$BATCH)"
+        echo "$N_TASKS" > data/n_expected_chunks.txt
 
         # ---------- Stage 1: submit array job ----------
         JOB1=$(sbatch --parsable \\
+            --chdir=${{SLURM_SUBMIT_DIR}} \\
             --array=0-${{LAST}}%{args.max_array_tasks} \\
             slurm/01_process.sh)
         echo "[$(date)] Submitted process array: job $JOB1 ($N_TASKS tasks)"
 
         # ---------- Stage 2: submit merge+train, dependent on array ----------
+        {"# afterok: abort merge if any task failed (--strict mode)" if args.strict else "# afterany: merge runs on whatever chunks exist; merge script warns about missing ones"}
         JOB2=$(sbatch --parsable \\
-            --dependency=afterok:${{JOB1}} \\
+            --chdir=${{SLURM_SUBMIT_DIR}} \\
+            --dependency={"afterok" if args.strict else "afterany"}:${{JOB1}} \\
             slurm/02_merge_train.sh)
         echo "[$(date)] Submitted merge+train: job $JOB2 (waits for $JOB1)"
 
@@ -214,6 +222,17 @@ def write_merge_train(args: argparse.Namespace, out_dir: Path) -> None:
         cd ${{SLURM_SUBMIT_DIR:-$HOME/Project_VLS_BN}}
         mkdir -p data/models data/processed
 
+        # ---------- chunk count sanity check ----------
+        N_ACTUAL=$(ls data/chunks/chunk_*.parquet 2>/dev/null | wc -l)
+        if [ -f data/n_expected_chunks.txt ]; then
+            N_EXPECTED=$(cat data/n_expected_chunks.txt)
+            if [ "$N_ACTUAL" -lt "$N_EXPECTED" ]; then
+                echo "[$(date)] WARNING: expected $N_EXPECTED chunk(s), found $N_ACTUAL — $(( N_EXPECTED - N_ACTUAL )) task(s) may have failed" >&2
+            else
+                echo "[$(date)] Chunk count OK: $N_ACTUAL / $N_EXPECTED"
+            fi
+        fi
+
         echo "[$(date)] Merging chunk parquets and training BN…"
         python scripts/hpc/merge_train.py \\
             --chunks-dir    data/chunks \\
@@ -255,6 +274,7 @@ def main() -> None:
     print(f"  getcontacts  = {args.getcontacts}")
     print(f"  gc python    = {args.getcontacts_python or '(active interpreter)'}")
     print(f"  conda-init   = {args.conda_init or '(none)'}")
+    print(f"  strict mode  = {'afterok (merge blocked if any task fails)' if args.strict else 'afterany (merge warns on missing chunks)'}")
     if args.dry_run:
         print()
         print("  *** DRY-RUN MODE: 01_process.sh will report batch plans only,")
