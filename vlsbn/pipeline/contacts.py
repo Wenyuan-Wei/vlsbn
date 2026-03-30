@@ -55,7 +55,8 @@ GETCONTACTS_PYTHON = os.environ.get("GETCONTACTS_PYTHON", sys.executable)
 _ZERO = 0.0
 
 # reduce subprocess fallback (AmberTools); detected once at import time.
-_REDUCE = shutil.which("reduce")
+# Override via REDUCE_PATH if reduce lives in a separate conda env.
+_REDUCE = os.environ.get("REDUCE_PATH") or shutil.which("reduce")
 
 
 # ---------------------------------------------------------------------------

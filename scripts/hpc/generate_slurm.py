@@ -73,6 +73,12 @@ def parse_args() -> argparse.Namespace:
                         "~/anaconda3/envs/vmd-python/bin/python). "
                         "Defaults to the active interpreter. Use this when "
                         "vmd-python lives in a separate conda env.")
+    p.add_argument("--reduce-path",
+                   default=None,
+                   help="Full path to the reduce binary for H-atom addition "
+                        "(e.g. ~/anaconda3/envs/reduce/bin/reduce). "
+                        "Use when reduce lives in a separate conda env. "
+                        "Omit to rely on shutil.which('reduce') or RDKit only.")
     p.add_argument("--out-dir",          type=Path, default=Path("slurm"),
                    help="Output directory for generated scripts")
     p.add_argument("--max-array-tasks",  type=int, default=2000,
@@ -191,6 +197,7 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
     dry_run_flag = " \\\n            --dry-run" if args.dry_run else ""
     gc_python = args.getcontacts_python or "python"
     gc_python_export = f"export GETCONTACTS_PYTHON={gc_python}"
+    reduce_export = f"export REDUCE_PATH={args.reduce_path}" if args.reduce_path else ""
     # Array range is set dynamically by 00_fetch_ids.sh; this template uses
     # a placeholder that sbatch --array overrides at submission time.
     script = textwrap.dedent(f"""\
@@ -212,6 +219,7 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
         {conda_init}conda activate {args.conda_env}
         export GETCONTACTS_PATH={args.getcontacts}
         {gc_python_export}
+        {reduce_export}
 
         cd ${{SLURM_SUBMIT_DIR:-$HOME/Project_VLS_BN}}
 
@@ -302,6 +310,7 @@ def main() -> None:
     print(f"  max parallel = {args.max_array_tasks} simultaneous tasks")
     print(f"  getcontacts  = {args.getcontacts}")
     print(f"  gc python    = {args.getcontacts_python or '(active interpreter)'}")
+    print(f"  reduce path  = {args.reduce_path or '(shutil.which or RDKit only)'}")
     print(f"  conda-init   = {args.conda_init or '(none)'}")
     print(f"  strict mode  = {'afterok (merge blocked if any task fails)' if args.strict else 'afterany (merge warns on missing chunks)'}")
     if args.dry_run:
