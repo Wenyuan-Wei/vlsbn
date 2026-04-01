@@ -208,8 +208,8 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
         TASK_ID=$SLURM_ARRAY_TASK_ID
         STOP_AFTER=${{STOP_AFTER:-5}}
 
-        # Resolve PDB ID from 1-based line number
-        PDB_ID=$(sed -n "$((TASK_ID + 1))p" data/pdb_ids.txt | tr -d '[:space:]')
+        # Resolve PDB ID from 1-based line number (normalise to lowercase)
+        PDB_ID=$(sed -n "$((TASK_ID + 1))p" data/pdb_ids.txt | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
         if [ -z "$PDB_ID" ]; then
             echo "[$(date)] No PDB ID for task $TASK_ID — exiting."
             exit 0

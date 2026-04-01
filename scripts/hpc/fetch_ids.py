@@ -67,7 +67,7 @@ def main() -> None:
 
     # Write plain-text list (used by the array job via sed)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text("\n".join(ids) + "\n")
+    args.out.write_text("\n".join(i.lower() for i in ids) + "\n")
     logger.info("Wrote %d IDs → %s", n, args.out)
 
     # Write JSON with fetch metadata
