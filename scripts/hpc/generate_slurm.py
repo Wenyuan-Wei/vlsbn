@@ -92,7 +92,7 @@ def parse_args() -> argparse.Namespace:
                    help="Maximum number of array indices your cluster allows (--array=0-N). "
                         "Each task will process ceil(N_IDS / max-array-size) PDBs.")
     p.add_argument("--max-array-tasks",  type=int, default=200,
-                   help="Suggested cap on simultaneous array tasks (%N throttle)")
+                   help="Suggested cap on simultaneous array tasks (%%N throttle)")
     p.add_argument("--conda-init",       default=None,
                    help="Alias or command required by your HPC to initialise conda "
                         "before 'conda activate' (e.g. 'mycondainit'). "
