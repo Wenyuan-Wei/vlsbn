@@ -16,8 +16,10 @@ dependencies:
   - cython
   - pyarrow
   - pytest
-  - conda-forge::rdkit        # pip rdkit segfaults on many HPC Linux nodes
   - pip
   - pip:
       - biopython
       - requests
+      # rdkit omitted: conda-forge builds require GLIBC>=2.25 (unavailable on
+      # older HPC nodes).  _add_hydrogens() falls back to reduce (AmberTools).
+      # On a modern workstation you can add it manually: pip install rdkit
