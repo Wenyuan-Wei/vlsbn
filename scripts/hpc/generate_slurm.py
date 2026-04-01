@@ -3,33 +3,39 @@
 Generate Slurm submission scripts for the VLS_BN HPC pipeline.
 
 Run this script locally (or on the login node) to produce a `slurm/`
-directory containing three job scripts plus a master submit script.
-
-The generated pipeline has three stages that chain automatically via
-Slurm job dependencies:
+directory containing three job scripts.  Stages are NOT chained
+automatically — submit each one manually after the previous completes.
 
     Stage 0  00_fetch_ids.sh   — fetch PDB IDs from RCSB → data/pdb_ids.txt
-                                  (also auto-submits stages 1 and 2 on completion)
-    Stage 1  01_process.sh     — array job: download → process → delete per batch
+    Stage 1  01_process.sh     — array job: one PDB per task, 5-step pipeline
     Stage 2  02_merge_train.sh — merge chunk parquets + train BN
+
+Pipeline steps inside 01_process.sh
+-------------------------------------
+  Step 1+2  step1_prepare.py     download + parse + write temp PDBs + delete original
+  Step 3    step2_protonate.py   add H atoms with RDKit / reduce
+  Step 4    get_static_contacts.py  (explicit bash command; runs under getcontacts env)
+  Step 5    step3_parse_contacts.py  parse TSV → raw contacts CSV
+
+Set STOP_AFTER=N (1–5) to halt after any step for debugging:
+  sbatch --export=ALL,STOP_AFTER=3 slurm/01_process.sh
 
 Usage
 -----
     python scripts/hpc/generate_slurm.py \\
-        --partition gpu          \\   # or cpu, short, etc.
-        --account   mygroup      \\   # optional, omit if not required
-        --conda-env vlsbn        \\
-        --batch-size 250         \\
-        --walltime-fetch  0:30:00 \\
-        --walltime-process 4:00:00 \\
-        --walltime-merge   2:00:00 \\
-        --mem-process 4G         \\
+        --partition gpu           \\
+        --account   mygroup       \\
+        --conda-env vlsbn         \\
         --getcontacts ~/getcontacts/get_static_contacts.py \\
-        --conda-init  mycondainit   # optional: alias needed before conda activate
+        --getcontacts-conda-env vmd-python   # conda env that has vmd-python
 
 Then on the HPC:
     cd ~/Project_VLS_BN
-    sbatch slurm/00_fetch_ids.sh        # stages 1 + 2 submit themselves automatically
+    sbatch slurm/00_fetch_ids.sh
+    # After it finishes, check data/pdb_ids.txt, then:
+    sbatch --array=0-<N_IDS-1>%200 slurm/01_process.sh
+    # After array finishes:
+    sbatch slurm/02_merge_train.sh
 """
 
 from __future__ import annotations
@@ -49,9 +55,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--account",          default=None,
                    help="Slurm account/project (omit if not required by your cluster)")
     p.add_argument("--conda-env",        default="vlsbn",
-                   help="Conda environment name")
-    p.add_argument("--batch-size",       type=int, default=250,
-                   help="Number of PDB IDs each array task processes")
+                   help="Conda environment name for the main pipeline (steps 1–3, 5)")
     p.add_argument("--walltime-fetch",   default="0:30:00",
                    help="Walltime for stage 0 (fetch IDs)")
     p.add_argument("--walltime-process", default="4:00:00",
@@ -61,39 +65,38 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mem-process",      default="4G",
                    help="Memory per array task")
     p.add_argument("--mem-merge",        default="32G",
-                   help="Memory for merge+train job (needs to hold full feature matrix)")
+                   help="Memory for merge+train job")
     p.add_argument("--cpus-process",     type=int, default=1,
                    help="CPUs per array task (getcontacts is single-threaded)")
     p.add_argument("--getcontacts",
                    default="~/getcontacts/get_static_contacts.py",
                    help="Full path to get_static_contacts.py on the HPC")
-    p.add_argument("--getcontacts-python",
-                   default=None,
-                   help="Python binary used to run getcontacts (e.g. "
+    p.add_argument("--getcontacts-conda-env", default=None,
+                   help="Conda environment that has vmd-python installed "
+                        "(e.g. 'vmd-python'). When provided, step 4 switches "
+                        "to this env before running getcontacts and switches "
+                        "back afterward.  If omitted, GETCONTACTS_PYTHON is "
+                        "used directly (set via --getcontacts-python).")
+    p.add_argument("--getcontacts-python", default=None,
+                   help="Python binary used to run getcontacts when NOT using "
+                        "--getcontacts-conda-env (e.g. "
                         "~/anaconda3/envs/vmd-python/bin/python). "
-                        "Defaults to the active interpreter. Use this when "
-                        "vmd-python lives in a separate conda env.")
-    p.add_argument("--reduce-path",
-                   default=None,
+                        "Defaults to the active interpreter.")
+    p.add_argument("--reduce-path",      default=None,
                    help="Full path to the reduce binary for H-atom addition "
                         "(e.g. ~/anaconda3/envs/reduce/bin/reduce). "
-                        "Use when reduce lives in a separate conda env. "
                         "Omit to rely on shutil.which('reduce') or RDKit only.")
     p.add_argument("--out-dir",          type=Path, default=Path("slurm"),
                    help="Output directory for generated scripts")
-    p.add_argument("--max-array-tasks",  type=int, default=2000,
-                   help="Hard cap on simultaneous array tasks (cluster courtesy)")
+    p.add_argument("--max-array-tasks",  type=int, default=200,
+                   help="Suggested cap on simultaneous array tasks (shown in help text)")
     p.add_argument("--conda-init",       default=None,
                    help="Alias or command required by your HPC to initialise conda "
                         "before 'conda activate' (e.g. 'mycondainit'). "
                         "Run after 'source ~/.bashrc'. Omit if not needed.")
-    p.add_argument("--dry-run",          action="store_true",
-                   help="Embed --dry-run in 01_process.sh so the array job reports "
-                        "its batch plan without downloading or writing any data")
     p.add_argument("--strict",           action="store_true",
-                   help="Use afterok dependency: merge job only runs if ALL array "
-                        "tasks exit 0.  Default (no flag): use afterany so merge "
-                        "runs on whatever chunks exist and warns about missing ones.")
+                   help="Use afterok dependency in 02_merge_train.sh comment "
+                        "(informational only — stages are not auto-chained).")
     return p.parse_args()
 
 
@@ -102,12 +105,12 @@ def _account_line(account: str | None) -> str:
 
 
 def _conda_init_line(conda_init: str | None) -> str:
-    """Return the conda-init command line (with trailing newline) or empty string."""
+    """Return the conda-init command (with trailing newline) or empty string."""
     return f"{conda_init}\n        " if conda_init else ""
 
 
 def write_fetch_ids(args: argparse.Namespace, out_dir: Path) -> None:
-    account = _account_line(args.account)
+    account    = _account_line(args.account)
     conda_init = _conda_init_line(args.conda_init)
     script = textwrap.dedent(f"""\
         #!/bin/bash
@@ -124,82 +127,59 @@ def write_fetch_ids(args: argparse.Namespace, out_dir: Path) -> None:
         # ---------- environment ----------
         source ~/.bashrc
         {conda_init}conda activate {args.conda_env}
-        export GETCONTACTS_PATH={args.getcontacts}
 
         cd ${{SLURM_SUBMIT_DIR:-$HOME/Project_VLS_BN}}
-        mkdir -p slurm/logs data/chunks data/raw data/models data/processed
+        mkdir -p slurm/logs data/raw data/work data/raw_contacts data/models data/processed
 
         # ---------- Stage 0: fetch IDs ----------
-        echo "[$(date)] Fetching PDB IDs…"
-        python scripts/hpc/fetch_ids.py --out data/pdb_ids.txt
+        echo "[$(date)] Fetching PDB IDs from RCSB..."
+        python scripts/hpc/fetch_ids.py \\
+            --out      data/pdb_ids.txt \\
+            --out-json data/pdb_ids.json
+
         if [ $? -ne 0 ]; then echo "fetch_ids.py failed"; exit 1; fi
 
         N_IDS=$(wc -l < data/pdb_ids.txt)
-        BATCH={args.batch_size}
-        N_TASKS=$(( (N_IDS + BATCH - 1) / BATCH ))
-        LAST=$(( N_TASKS - 1 ))
-        echo "[$(date)] $N_IDS IDs → $N_TASKS array tasks (batch=$BATCH)"
-        echo "$N_TASKS" > data/n_expected_chunks.txt
-
-        # ---------- Detect missing chunks (resume support) ----------
-        N_EXISTING=$(ls data/chunks/chunk_*.parquet 2>/dev/null | wc -l)
-
-        if [ "$N_EXISTING" -ge "$N_TASKS" ]; then
-            echo "[$(date)] All $N_TASKS chunk(s) already exist — skipping array job."
-            MISSING=""
-        elif [ "$N_EXISTING" -eq 0 ]; then
-            echo "[$(date)] No existing chunks — submitting full array (0-$LAST)."
-            MISSING="0-$LAST"
-        else
-            echo "[$(date)] $N_EXISTING / $N_TASKS chunk(s) found — detecting missing tasks…"
-            MISSING=""
-            for i in $(seq 0 $LAST); do
-                if [ ! -f "$(printf 'data/chunks/chunk_%05d.parquet' $i)" ]; then
-                    MISSING="${{MISSING:+${{MISSING}},}}$i"
-                fi
-            done
-            N_MISSING=$(echo "$MISSING" | tr ',' '\\n' | wc -l)
-            echo "[$(date)] $N_MISSING missing task(s) to rerun."
-        fi
-
-        # ---------- Stage 1: submit array job (only missing tasks) ----------
-        if [ -n "$MISSING" ]; then
-            JOB1=$(sbatch --parsable \\
-                --chdir=${{SLURM_SUBMIT_DIR}} \\
-                --array=${{MISSING}}%{args.max_array_tasks} \\
-                slurm/01_process.sh)
-            echo "[$(date)] Submitted process array: job $JOB1 (tasks: $MISSING)"
-
-            # ---------- Stage 2: submit merge+train, dependent on array ----------
-            {"# afterok: abort merge if any task failed (--strict mode)" if args.strict else "# afterany: merge runs on whatever chunks exist; merge script warns about missing ones"}
-            JOB2=$(sbatch --parsable \\
-                --chdir=${{SLURM_SUBMIT_DIR}} \\
-                --dependency={"afterok" if args.strict else "afterany"}:${{JOB1}} \\
-                slurm/02_merge_train.sh)
-            echo "[$(date)] Submitted merge+train: job $JOB2 (waits for $JOB1)"
-        else
-            # All chunks present — submit merge immediately with no dependency
-            JOB2=$(sbatch --parsable \\
-                --chdir=${{SLURM_SUBMIT_DIR}} \\
-                slurm/02_merge_train.sh)
-            echo "[$(date)] Submitted merge+train: job $JOB2 (no array dependency)"
-        fi
-
-        echo "[$(date)] All stages submitted.  Monitor with: squeue -u $USER"
+        echo "[$(date)] Done. $N_IDS IDs written to data/pdb_ids.txt"
+        echo ""
+        echo "Next step — submit the processing array manually:"
+        echo "  sbatch --array=0-$((N_IDS - 1))%{args.max_array_tasks} slurm/01_process.sh"
+        echo ""
+        echo "To stop at a specific step for debugging, set STOP_AFTER:"
+        echo "  sbatch --export=ALL,STOP_AFTER=3 --array=0-0 slurm/01_process.sh"
     """).rstrip()
 
     (out_dir / "00_fetch_ids.sh").write_text(script + "\n")
 
 
 def write_process(args: argparse.Namespace, out_dir: Path) -> None:
-    account = _account_line(args.account)
+    account    = _account_line(args.account)
     conda_init = _conda_init_line(args.conda_init)
-    dry_run_flag = " \\\n            --dry-run" if args.dry_run else ""
-    gc_python = args.getcontacts_python or "python"
-    gc_python_export = f"export GETCONTACTS_PYTHON={gc_python}"
-    reduce_export = f"export REDUCE_PATH={args.reduce_path}" if args.reduce_path else ""
-    # Array range is set dynamically by 00_fetch_ids.sh; this template uses
-    # a placeholder that sbatch --array overrides at submission time.
+
+    # Env var exports for the main vlsbn env section
+    gc_python_export = (
+        f"export GETCONTACTS_PYTHON={args.getcontacts_python}"
+        if args.getcontacts_python else ""
+    )
+    reduce_export = (
+        f"export REDUCE_PATH={args.reduce_path}"
+        if args.reduce_path else ""
+    )
+
+    # Step 4: getcontacts bash section — env switching or direct python path
+    if args.getcontacts_conda_env:
+        gc_env_activate   = f"conda activate {args.getcontacts_conda_env}"
+        gc_python_cmd     = "python"
+        gc_env_deactivate = f"conda activate {args.conda_env}"
+    else:
+        gc_env_activate   = ""
+        gc_python_cmd     = "$GETCONTACTS_PYTHON"
+        gc_env_deactivate = ""
+
+    # Only emit non-empty lines for env switching
+    gc_activate_block   = f"\n        {gc_env_activate}"   if gc_env_activate   else ""
+    gc_deactivate_block = f"\n        {gc_env_deactivate}" if gc_env_deactivate else ""
+
     script = textwrap.dedent(f"""\
         #!/bin/bash
         #SBATCH --job-name=vlsbn_proc
@@ -211,10 +191,12 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
         #SBATCH --time={args.walltime_process}
         #SBATCH --output=slurm/logs/proc_%A_%a.out
         #SBATCH --error=slurm/logs/proc_%A_%a.err
-        # NOTE: --array is NOT set here; 00_fetch_ids.sh sets it dynamically
-        #       via "sbatch --array=0-N slurm/01_process.sh"
+        # NOTE: --array is NOT set here.  Submit with:
+        #   sbatch --array=0-<N_IDS-1>%{args.max_array_tasks} slurm/01_process.sh
+        # Use STOP_AFTER=N (1-5) to halt after a specific step:
+        #   sbatch --export=ALL,STOP_AFTER=3 --array=0-0 slurm/01_process.sh
 
-        # ---------- environment ----------
+        # ---------- environment (main: vlsbn) ----------
         source ~/.bashrc
         {conda_init}conda activate {args.conda_env}
         export GETCONTACTS_PATH={args.getcontacts}
@@ -223,22 +205,87 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
 
         cd ${{SLURM_SUBMIT_DIR:-$HOME/Project_VLS_BN}}
 
-        echo "[$(date)] Task $SLURM_ARRAY_TASK_ID starting on $(hostname)"
+        TASK_ID=$SLURM_ARRAY_TASK_ID
+        STOP_AFTER=${{STOP_AFTER:-5}}
 
-        python scripts/hpc/hpc_process.py \\
-            --ids-file   data/pdb_ids.txt \\
-            --out-dir    data/chunks \\
-            --raw-dir    data/raw \\
-            --batch-size {args.batch_size}{dry_run_flag}
+        # Resolve PDB ID from 1-based line number
+        PDB_ID=$(sed -n "$((TASK_ID + 1))p" data/pdb_ids.txt | tr -d '[:space:]')
+        if [ -z "$PDB_ID" ]; then
+            echo "[$(date)] No PDB ID for task $TASK_ID — exiting."
+            exit 0
+        fi
 
-        echo "[$(date)] Task $SLURM_ARRAY_TASK_ID finished (exit $?)"
+        WORK_PDB_DIR=data/work/$PDB_ID
+        mkdir -p "$WORK_PDB_DIR"
+
+        echo "[$(date)] Task $TASK_ID: $PDB_ID  (STOP_AFTER=$STOP_AFTER)"
+
+        # ===== Step 1+2: download, parse, write temp PDBs, delete original =====
+        echo "[$(date)] Step 1+2: download + parse + write temp PDBs"
+        python scripts/hpc/step1_prepare.py \\
+            --pdb-id  "$PDB_ID" \\
+            --work-dir data/work \\
+            --raw-dir  data/raw
+        RC=$?; if [ $RC -ne 0 ]; then echo "step1_prepare failed (rc=$RC)"; exit 1; fi
+
+        if [ "$STOP_AFTER" -le 2 ]; then
+            echo "[$(date)] STOP_AFTER=$STOP_AFTER — halting after step 2."
+            exit 0
+        fi
+
+        # ===== Step 3: protonate =====
+        echo "[$(date)] Step 3: protonate"
+        python scripts/hpc/step2_protonate.py \\
+            --pdb-id   "$PDB_ID" \\
+            --work-dir data/work
+        RC=$?; if [ $RC -ne 0 ]; then echo "step2_protonate failed (rc=$RC)"; exit 1; fi
+
+        if [ "$STOP_AFTER" -le 3 ]; then
+            echo "[$(date)] STOP_AFTER=$STOP_AFTER — halting after step 3."
+            exit 0
+        fi
+
+        # ===== Step 4: getcontacts (explicit bash — runs under getcontacts env) ====={gc_activate_block}
+        echo "[$(date)] Step 4: getcontacts"
+        MANIFEST=$WORK_PDB_DIR/manifest.tsv
+        if [ ! -f "$MANIFEST" ]; then
+            echo "Manifest not found: $MANIFEST"; exit 1
+        fi
+
+        while IFS=$'\\t' read -r ligand_id resname n_prot n_lig; do
+            [ "$ligand_id" = "ligand_id" ] && continue   # skip header
+            GC_INPUT="$WORK_PDB_DIR/${{ligand_id}}_h.pdb"
+            [ ! -f "$GC_INPUT" ] && GC_INPUT="$WORK_PDB_DIR/${{ligand_id}}.pdb"
+            echo "[$(date)]   $ligand_id (resname=$resname)"
+            {gc_python_cmd} {args.getcontacts} \\
+                --structure "$GC_INPUT" \\
+                --output    "$WORK_PDB_DIR/${{ligand_id}}_contacts.tsv" \\
+                --itypes    hb sb pc ps ts vdw \\
+                --sele      protein \\
+                --sele2     resname "$resname"
+        done < "$MANIFEST"{gc_deactivate_block}
+
+        if [ "$STOP_AFTER" -le 4 ]; then
+            echo "[$(date)] STOP_AFTER=$STOP_AFTER — halting after step 4."
+            exit 0
+        fi
+
+        # ===== Step 5: parse getcontacts TSV → raw contacts CSV =====
+        echo "[$(date)] Step 5: parse contacts"
+        python scripts/hpc/step3_parse_contacts.py \\
+            --pdb-id   "$PDB_ID" \\
+            --work-dir data/work \\
+            --out-dir  data/raw_contacts
+        RC=$?; if [ $RC -ne 0 ]; then echo "step3_parse_contacts failed (rc=$RC)"; exit 1; fi
+
+        echo "[$(date)] Task $TASK_ID ($PDB_ID) complete."
     """).rstrip()
 
     (out_dir / "01_process.sh").write_text(script + "\n")
 
 
 def write_merge_train(args: argparse.Namespace, out_dir: Path) -> None:
-    account = _account_line(args.account)
+    account    = _account_line(args.account)
     conda_init = _conda_init_line(args.conda_init)
     script = textwrap.dedent(f"""\
         #!/bin/bash
@@ -270,7 +317,7 @@ def write_merge_train(args: argparse.Namespace, out_dir: Path) -> None:
             fi
         fi
 
-        echo "[$(date)] Merging chunk parquets and training BN…"
+        echo "[$(date)] Merging chunk parquets and training BN..."
         python scripts/hpc/merge_train.py \\
             --chunks-dir    data/chunks \\
             --out-features  data/processed/contact_features.parquet \\
@@ -295,28 +342,29 @@ def main() -> None:
 
     print(f"Generated scripts in {out_dir}/")
     print()
-    print("  slurm/00_fetch_ids.sh   — Stage 0: fetch IDs (auto-submits stages 1+2)")
-    print("  slurm/01_process.sh     — Stage 1: array processing job")
-    print("  slurm/02_merge_train.sh — Stage 2: merge + train BN")
+    print("  slurm/00_fetch_ids.sh   — Stage 0: fetch IDs (run first, manually)")
+    print("  slurm/01_process.sh     — Stage 1: per-PDB array job (submit manually)")
+    print("  slurm/02_merge_train.sh — Stage 2: merge + train BN (submit manually)")
     print()
-    print("To run the full pipeline:")
-    print(f"  cd ~/Project_VLS_BN")
-    print(f"  sbatch slurm/00_fetch_ids.sh")
+    print("Workflow:")
+    print("  sbatch slurm/00_fetch_ids.sh")
+    print("  # wait for it to finish, then:")
+    print(f"  sbatch --array=0-<N_IDS-1>%{args.max_array_tasks} slurm/01_process.sh")
+    print("  # wait for array to finish, then:")
+    print("  sbatch slurm/02_merge_train.sh")
+    print()
+    print("Debug a single PDB (stop after step 3):")
+    print("  sbatch --export=ALL,STOP_AFTER=3 --array=0-0 slurm/01_process.sh")
     print()
     print("Settings:")
-    print(f"  partition    = {args.partition}")
-    print(f"  conda env    = {args.conda_env}")
-    print(f"  batch size   = {args.batch_size} PDBs/task")
-    print(f"  max parallel = {args.max_array_tasks} simultaneous tasks")
-    print(f"  getcontacts  = {args.getcontacts}")
-    print(f"  gc python    = {args.getcontacts_python or '(active interpreter)'}")
-    print(f"  reduce path  = {args.reduce_path or '(shutil.which or RDKit only)'}")
-    print(f"  conda-init   = {args.conda_init or '(none)'}")
-    print(f"  strict mode  = {'afterok (merge blocked if any task fails)' if args.strict else 'afterany (merge warns on missing chunks)'}")
-    if args.dry_run:
-        print()
-        print("  *** DRY-RUN MODE: 01_process.sh will report batch plans only,")
-        print("      no PDB files will be downloaded or processed. ***")
+    print(f"  partition         = {args.partition}")
+    print(f"  conda env (main)  = {args.conda_env}")
+    print(f"  gc conda env      = {args.getcontacts_conda_env or '(use GETCONTACTS_PYTHON)'}")
+    print(f"  max parallel      = {args.max_array_tasks} simultaneous tasks")
+    print(f"  getcontacts       = {args.getcontacts}")
+    print(f"  gc python         = {args.getcontacts_python or '(active interpreter)'}")
+    print(f"  reduce path       = {args.reduce_path or '(shutil.which or RDKit only)'}")
+    print(f"  conda-init        = {args.conda_init or '(none)'}")
 
 
 if __name__ == "__main__":
