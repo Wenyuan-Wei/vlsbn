@@ -88,8 +88,11 @@ def parse_args() -> argparse.Namespace:
                         "Omit to rely on shutil.which('reduce') or RDKit only.")
     p.add_argument("--out-dir",          type=Path, default=Path("slurm"),
                    help="Output directory for generated scripts")
+    p.add_argument("--max-array-size",   type=int, default=10000,
+                   help="Maximum number of array indices your cluster allows (--array=0-N). "
+                        "Each task will process ceil(N_IDS / max-array-size) PDBs.")
     p.add_argument("--max-array-tasks",  type=int, default=200,
-                   help="Suggested cap on simultaneous array tasks (shown in help text)")
+                   help="Suggested cap on simultaneous array tasks (%N throttle)")
     p.add_argument("--conda-init",       default=None,
                    help="Alias or command required by your HPC to initialise conda "
                         "before 'conda activate' (e.g. 'mycondainit'). "
@@ -140,10 +143,14 @@ def write_fetch_ids(args: argparse.Namespace, out_dir: Path) -> None:
         if [ $? -ne 0 ]; then echo "fetch_ids.py failed"; exit 1; fi
 
         N_IDS=$(wc -l < data/pdb_ids.txt)
+        MAX_ARRAY={args.max_array_size}
+        ACTUAL_TASKS=$(( N_IDS < MAX_ARRAY ? N_IDS : MAX_ARRAY ))
+        CHUNK_SIZE=$(( (N_IDS + MAX_ARRAY - 1) / MAX_ARRAY ))
         echo "[$(date)] Done. $N_IDS IDs written to data/pdb_ids.txt"
+        echo "  Array tasks needed : $ACTUAL_TASKS  (chunk size: ~$CHUNK_SIZE PDBs/task)"
         echo ""
         echo "Next step — submit the processing array manually:"
-        echo "  sbatch --array=0-$((N_IDS - 1))%{args.max_array_tasks} slurm/01_process.sh"
+        echo "  sbatch --array=0-$((ACTUAL_TASKS - 1))%{args.max_array_tasks} slurm/01_process.sh"
         echo ""
         echo "To stop at a specific step for debugging, set STOP_AFTER:"
         echo "  sbatch --export=ALL,STOP_AFTER=3 --array=0-0 slurm/01_process.sh"
@@ -191,9 +198,12 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
         #SBATCH --time={args.walltime_process}
         #SBATCH --output=slurm/logs/proc_%A_%a.out
         #SBATCH --error=slurm/logs/proc_%A_%a.err
-        # NOTE: --array is NOT set here.  Submit with:
-        #   sbatch --array=0-<N_IDS-1>%{args.max_array_tasks} slurm/01_process.sh
-        # Use STOP_AFTER=N (1-5) to halt after a specific step:
+        # NOTE: --array is NOT set here.  Submit with the command printed by 00_fetch_ids.sh,
+        # or compute manually:
+        #   N=$(wc -l < data/pdb_ids.txt)
+        #   TASKS=$(( N < {args.max_array_size} ? N : {args.max_array_size} ))
+        #   sbatch --array=0-$((TASKS-1))%{args.max_array_tasks} slurm/01_process.sh
+        # Use STOP_AFTER=N (1-5) to halt after a specific step (exits the whole task):
         #   sbatch --export=ALL,STOP_AFTER=3 --array=0-0 slurm/01_process.sh
 
         # ---------- environment (main: vlsbn) ----------
@@ -208,25 +218,31 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
         TASK_ID=$SLURM_ARRAY_TASK_ID
         STOP_AFTER=${{STOP_AFTER:-5}}
 
-        # Resolve PDB ID from 1-based line number (normalise to lowercase)
-        PDB_ID=$(sed -n "$((TASK_ID + 1))p" data/pdb_ids.txt | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-        if [ -z "$PDB_ID" ]; then
-            echo "[$(date)] No PDB ID for task $TASK_ID — exiting."
-            exit 0
-        fi
+        # Compute chunk: each task owns ceil(N_IDS / {args.max_array_size}) PDBs
+        N_IDS=$(wc -l < data/pdb_ids.txt)
+        MAX_ARRAY={args.max_array_size}
+        CHUNK_SIZE=$(( (N_IDS + MAX_ARRAY - 1) / MAX_ARRAY ))
+        START=$(( TASK_ID * CHUNK_SIZE ))
+
+        echo "[$(date)] Task $TASK_ID: lines $START–$((START + CHUNK_SIZE - 1)) of $N_IDS  (chunk=$CHUNK_SIZE, STOP_AFTER=$STOP_AFTER)"
+
+        for ((IDX=START; IDX<START+CHUNK_SIZE; IDX++)); do
+
+        PDB_ID=$(sed -n "$((IDX + 1))p" data/pdb_ids.txt | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+        [ -z "$PDB_ID" ] && continue
 
         WORK_PDB_DIR=data/work/$PDB_ID
         mkdir -p "$WORK_PDB_DIR"
 
-        echo "[$(date)] Task $TASK_ID: $PDB_ID  (STOP_AFTER=$STOP_AFTER)"
+        echo "[$(date)]   IDX=$IDX  PDB=$PDB_ID"
 
         # ===== Step 1+2: download, parse, write temp PDBs, delete original =====
-        echo "[$(date)] Step 1+2: download + parse + write temp PDBs"
+        echo "[$(date)]   Step 1+2: download + parse + write temp PDBs"
         python scripts/hpc/step1_prepare.py \\
             --pdb-id  "$PDB_ID" \\
             --work-dir data/work \\
             --raw-dir  data/raw
-        RC=$?; if [ $RC -ne 0 ]; then echo "step1_prepare failed (rc=$RC)"; exit 1; fi
+        RC=$?; if [ $RC -ne 0 ]; then echo "step1_prepare failed for $PDB_ID (rc=$RC)"; continue; fi
 
         if [ "$STOP_AFTER" -le 2 ]; then
             echo "[$(date)] STOP_AFTER=$STOP_AFTER — halting after step 2."
@@ -234,11 +250,11 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
         fi
 
         # ===== Step 3: protonate =====
-        echo "[$(date)] Step 3: protonate"
+        echo "[$(date)]   Step 3: protonate"
         python scripts/hpc/step2_protonate.py \\
             --pdb-id   "$PDB_ID" \\
             --work-dir data/work
-        RC=$?; if [ $RC -ne 0 ]; then echo "step2_protonate failed (rc=$RC)"; exit 1; fi
+        RC=$?; if [ $RC -ne 0 ]; then echo "step2_protonate failed for $PDB_ID (rc=$RC)"; continue; fi
 
         if [ "$STOP_AFTER" -le 3 ]; then
             echo "[$(date)] STOP_AFTER=$STOP_AFTER — halting after step 3."
@@ -246,17 +262,17 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
         fi
 
         # ===== Step 4: getcontacts (explicit bash — runs under getcontacts env) ====={gc_activate_block}
-        echo "[$(date)] Step 4: getcontacts"
+        echo "[$(date)]   Step 4: getcontacts"
         MANIFEST=$WORK_PDB_DIR/manifest.tsv
         if [ ! -f "$MANIFEST" ]; then
-            echo "Manifest not found: $MANIFEST"; exit 1
+            echo "Manifest not found: $MANIFEST — skipping $PDB_ID"; continue
         fi
 
         while IFS=$'\\t' read -r ligand_id resname n_prot n_lig; do
             [ "$ligand_id" = "ligand_id" ] && continue   # skip header
             GC_INPUT="$WORK_PDB_DIR/${{ligand_id}}_h.pdb"
             [ ! -f "$GC_INPUT" ] && GC_INPUT="$WORK_PDB_DIR/${{ligand_id}}.pdb"
-            echo "[$(date)]   $ligand_id (resname=$resname)"
+            echo "[$(date)]     $ligand_id (resname=$resname)"
             {gc_python_cmd} {args.getcontacts} \\
                 --structure "$GC_INPUT" \\
                 --output    "$WORK_PDB_DIR/${{ligand_id}}_contacts.tsv" \\
@@ -271,14 +287,17 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
         fi
 
         # ===== Step 5: parse getcontacts TSV → raw contacts CSV =====
-        echo "[$(date)] Step 5: parse contacts"
+        echo "[$(date)]   Step 5: parse contacts"
         python scripts/hpc/step3_parse_contacts.py \\
             --pdb-id   "$PDB_ID" \\
             --work-dir data/work \\
             --out-dir  data/raw_contacts
-        RC=$?; if [ $RC -ne 0 ]; then echo "step3_parse_contacts failed (rc=$RC)"; exit 1; fi
+        RC=$?; if [ $RC -ne 0 ]; then echo "step3_parse_contacts failed for $PDB_ID (rc=$RC)"; continue; fi
 
-        echo "[$(date)] Task $TASK_ID ($PDB_ID) complete."
+        echo "[$(date)]   IDX=$IDX ($PDB_ID) done."
+
+        done  # end PDB chunk loop
+        echo "[$(date)] Task $TASK_ID complete."
     """).rstrip()
 
     (out_dir / "01_process.sh").write_text(script + "\n")
@@ -348,8 +367,8 @@ def main() -> None:
     print()
     print("Workflow:")
     print("  sbatch slurm/00_fetch_ids.sh")
-    print("  # wait for it to finish, then:")
-    print(f"  sbatch --array=0-<N_IDS-1>%{args.max_array_tasks} slurm/01_process.sh")
+    print("  # wait for it to finish — 00_fetch_ids.sh prints the exact sbatch command, or:")
+    print(f"  sbatch --array=0-<min(N_IDS,{args.max_array_size})-1>%{args.max_array_tasks} slurm/01_process.sh")
     print("  # wait for array to finish, then:")
     print("  sbatch slurm/02_merge_train.sh")
     print()
@@ -360,7 +379,8 @@ def main() -> None:
     print(f"  partition         = {args.partition}")
     print(f"  conda env (main)  = {args.conda_env}")
     print(f"  gc conda env      = {args.getcontacts_conda_env or '(use GETCONTACTS_PYTHON)'}")
-    print(f"  max parallel      = {args.max_array_tasks} simultaneous tasks")
+    print(f"  max array size    = {args.max_array_size} (cluster limit; ~{args.max_array_size} tasks total)")
+    print(f"  max parallel      = {args.max_array_tasks} simultaneous tasks (%N throttle)")
     print(f"  getcontacts       = {args.getcontacts}")
     print(f"  gc python         = {args.getcontacts_python or '(active interpreter)'}")
     print(f"  reduce path       = {args.reduce_path or '(shutil.which or RDKit only)'}")
