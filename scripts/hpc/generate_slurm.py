@@ -260,9 +260,9 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
             {gc_python_cmd} {args.getcontacts} \\
                 --structure "$GC_INPUT" \\
                 --output    "$WORK_PDB_DIR/${{ligand_id}}_contacts.tsv" \\
-                --itypes    hb sb pc ps ts vdw \\
+                --itypes    all \\
                 --sele      protein \\
-                --sele2     resname "$resname"
+                --sele2     "resname $resname"
         done < "$MANIFEST"{gc_deactivate_block}
 
         if [ "$STOP_AFTER" -le 4 ]; then
