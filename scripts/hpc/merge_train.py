@@ -41,7 +41,8 @@ _META_COLS = {"pdb_id", "ligand_id"}
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Merge chunks and train VLS_BN")
-    p.add_argument("--chunks-dir",    type=Path, default=Path("data/chunks"))
+    p.add_argument("--features-dir",  type=Path, default=Path("data/features"),
+                   help="Directory containing per-PDB feature parquets from step4_featurize")
     p.add_argument("--out-features",  type=Path, default=Path("data/processed/contact_features.parquet"),
                    help="Save merged feature matrix here (optional but useful for inspection)")
     p.add_argument("--out-trained",   type=Path, default=Path("data/models/bn_trained.pkl"))
@@ -57,15 +58,15 @@ def main() -> None:
     args = parse_args()
 
     # ------------------------------------------------------------------ #
-    # Merge chunks                                                         #
+    # Merge per-PDB feature parquets                                       #
     # ------------------------------------------------------------------ #
-    chunk_files = sorted(args.chunks_dir.glob("chunk_*.parquet"))
+    chunk_files = sorted(args.features_dir.glob("*.parquet"))
     if not chunk_files:
-        logger.error("No chunk parquets found in %s", args.chunks_dir)
-        logger.error("Run hpc_process.py array job first.")
+        logger.error("No feature parquets found in %s", args.features_dir)
+        logger.error("Run the 01_process.sh array job (all steps through step 6) first.")
         sys.exit(1)
 
-    logger.info("Merging %d chunk files…", len(chunk_files))
+    logger.info("Merging %d feature parquet(s)…", len(chunk_files))
     df = pd.concat([pd.read_parquet(f) for f in chunk_files], ignore_index=True)
     logger.info("Merged: %d complexes total.", len(df))
 

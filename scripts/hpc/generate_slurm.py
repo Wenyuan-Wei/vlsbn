@@ -203,7 +203,7 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
         #   N=$(wc -l < data/pdb_ids.txt)
         #   TASKS=$(( N < {args.max_array_size} ? N : {args.max_array_size} ))
         #   sbatch --array=0-$((TASKS-1))%{args.max_array_tasks} slurm/01_process.sh
-        # Use STOP_AFTER=N (1-5) to halt after a specific step (exits the whole task):
+        # Use STOP_AFTER=N (1-6) to halt after a specific step (exits the whole task):
         #   sbatch --export=ALL,STOP_AFTER=3 --array=0-0 slurm/01_process.sh
 
         # ---------- environment (main: vlsbn) ----------
@@ -216,7 +216,7 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
         cd ${{SLURM_SUBMIT_DIR:-$HOME/Project_VLS_BN}}
 
         TASK_ID=$SLURM_ARRAY_TASK_ID
-        STOP_AFTER=${{STOP_AFTER:-5}}
+        STOP_AFTER=${{STOP_AFTER:-6}}
 
         # Compute chunk: each task owns ceil(N_IDS / {args.max_array_size}) PDBs
         N_IDS=$(wc -l < data/pdb_ids.txt)
@@ -294,6 +294,20 @@ def write_process(args: argparse.Namespace, out_dir: Path) -> None:
             --out-dir  data/raw_contacts
         RC=$?; if [ $RC -ne 0 ]; then echo "step3_parse_contacts failed for $PDB_ID (rc=$RC)"; continue; fi
 
+        if [ "$STOP_AFTER" -le 5 ]; then
+            echo "[$(date)] STOP_AFTER=$STOP_AFTER — halting after step 5."
+            exit 0
+        fi
+
+        # ===== Step 6: featurize → contact-density parquet =====
+        echo "[$(date)]   Step 6: featurize"
+        python scripts/hpc/step4_featurize.py \\
+            --pdb-id       "$PDB_ID" \\
+            --work-dir     data/work \\
+            --contacts-dir data/raw_contacts \\
+            --out-dir      data/features
+        RC=$?; if [ $RC -ne 0 ]; then echo "step4_featurize failed for $PDB_ID (rc=$RC)"; continue; fi
+
         echo "[$(date)]   IDX=$IDX ($PDB_ID) done."
 
         done  # end PDB chunk loop
@@ -325,20 +339,18 @@ def write_merge_train(args: argparse.Namespace, out_dir: Path) -> None:
         cd ${{SLURM_SUBMIT_DIR:-$HOME/Project_VLS_BN}}
         mkdir -p data/models data/processed
 
-        # ---------- chunk count sanity check ----------
-        N_ACTUAL=$(ls data/chunks/chunk_*.parquet 2>/dev/null | wc -l)
-        if [ -f data/n_expected_chunks.txt ]; then
-            N_EXPECTED=$(cat data/n_expected_chunks.txt)
-            if [ "$N_ACTUAL" -lt "$N_EXPECTED" ]; then
-                echo "[$(date)] WARNING: expected $N_EXPECTED chunk(s), found $N_ACTUAL — $(( N_EXPECTED - N_ACTUAL )) task(s) may have failed" >&2
-            else
-                echo "[$(date)] Chunk count OK: $N_ACTUAL / $N_EXPECTED"
-            fi
+        # ---------- coverage sanity check ----------
+        N_ACTUAL=$(ls data/features/*.parquet 2>/dev/null | wc -l)
+        N_IDS=$(wc -l < data/pdb_ids.txt 2>/dev/null || echo 0)
+        echo "[$(date)] Feature parquets found: $N_ACTUAL  (expected up to $N_IDS PDBs)"
+        if [ "$N_ACTUAL" -eq 0 ]; then
+            echo "[$(date)] ERROR: no feature parquets in data/features/ — did step 6 run?" >&2
+            exit 1
         fi
 
-        echo "[$(date)] Merging chunk parquets and training BN..."
+        echo "[$(date)] Merging feature parquets and training BN..."
         python scripts/hpc/merge_train.py \\
-            --chunks-dir    data/chunks \\
+            --features-dir  data/features \\
             --out-features  data/processed/contact_features.parquet \\
             --out-trained   data/models/bn_trained.pkl \\
             --out-reference data/models/bn_reference.pkl
